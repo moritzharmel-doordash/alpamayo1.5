@@ -15,19 +15,21 @@
 
 """Load data from physical_ai_av.PhysicalAIAVDatasetInterface for model inference."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import physical_ai_av
 import scipy.spatial.transform as spt
 import torch
 from einops import rearrange
+
+if TYPE_CHECKING:
+    import physical_ai_av
 
 
 def load_physical_aiavdataset(
     clip_id: str,
     t0_us: int = 5_100_000,
-    avdi: physical_ai_av.PhysicalAIAVDatasetInterface | None = None,
+    avdi: "physical_ai_av.PhysicalAIAVDatasetInterface | None" = None,
     maybe_stream: bool = True,
     num_history_steps: int = 16,
     num_future_steps: int = 64,
@@ -68,6 +70,13 @@ def load_physical_aiavdataset(
             - clip_id: The clip ID
     """
     if avdi is None:
+        try:
+            import physical_ai_av
+        except ImportError as exc:
+            raise ImportError(
+                "physical_ai_av is required only for load_physical_aiavdataset(). "
+                "Install it or provide an initialized avdi instance."
+            ) from exc
         avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
 
     if camera_features is None:

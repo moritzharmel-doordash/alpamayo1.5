@@ -16,6 +16,7 @@
 """Base Reasoning VLA model implementation for Alpamayo 1.5 release."""
 
 import copy
+import importlib.util
 import logging
 from typing import Any
 
@@ -77,6 +78,18 @@ SPECIAL_TOKENS_KEYS = [
     "answer_end",
 ]
 SPECIAL_TOKENS = {k: "<|" + k + "|>" for k in SPECIAL_TOKENS_KEYS}
+
+
+def _resolve_attn_implementation(requested: str | None) -> str | None:
+    """Best-effort attention implementation selection for Cityhopper environments."""
+    if requested != "flash_attention_2":
+        return requested
+    if importlib.util.find_spec("flash_attn") is not None:
+        return requested
+    logger.warning(
+        "flash_attention_2 requested but flash_attn is not importable; falling back to sdpa."
+    )
+    return "sdpa"
 
 
 def _recursive_setattr(obj: Any, attr: str, value: Any) -> None:
@@ -374,15 +387,32 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
         Qwen3-VL uses Qwen3VLForConditionalGeneration from transformers.
         See: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
         """
+        attn_implementation = _resolve_attn_implementation(config.attn_implementation)
         vlm_config = Qwen3VLConfig.from_pretrained(
             config.vlm_name_or_path,
             dtype=config.model_dtype,
-            attn_implementation=config.attn_implementation,
+            attn_implementation=attn_implementation,
         )
         self.original_vocab_size = vlm_config.text_config.vocab_size
         vlm_config.text_config.vocab_size = config.vocab_size
         vlm_config.vocab_size = config.vocab_size
-        self.vlm = Qwen3VLForConditionalGeneration(vlm_config)
+        try:
+            self.vlm = Qwen3VLForConditionalGeneration(vlm_config)
+        except Exception:
+            if attn_implementation != "flash_attention_2":
+                raise
+            logger.exception(
+                "Failed to initialize Qwen3-VL with flash_attention_2; retrying with sdpa."
+            )
+            vlm_config = Qwen3VLConfig.from_pretrained(
+                config.vlm_name_or_path,
+                dtype=config.model_dtype,
+                attn_implementation="sdpa",
+            )
+            self.original_vocab_size = vlm_config.text_config.vocab_size
+            vlm_config.text_config.vocab_size = config.vocab_size
+            vlm_config.vocab_size = config.vocab_size
+            self.vlm = Qwen3VLForConditionalGeneration(vlm_config)
 
     def _initialize_trajectory_tokenizers(
         self, config: ReasoningVLAConfig, pretrained_modules: dict[str, Any]
@@ -413,11 +443,24 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
         pretrained_modules = {}
 
         # Load VLM
-        vlm = Qwen3VLForConditionalGeneration.from_pretrained(
-            config.vlm_name_or_path,
-            dtype=config.model_dtype,
-            attn_implementation=config.attn_implementation,
-        )
+        attn_implementation = _resolve_attn_implementation(config.attn_implementation)
+        try:
+            vlm = Qwen3VLForConditionalGeneration.from_pretrained(
+                config.vlm_name_or_path,
+                dtype=config.model_dtype,
+                attn_implementation=attn_implementation,
+            )
+        except Exception:
+            if attn_implementation != "flash_attention_2":
+                raise
+            logger.exception(
+                "Failed to load Qwen3-VL with flash_attention_2; retrying with sdpa."
+            )
+            vlm = Qwen3VLForConditionalGeneration.from_pretrained(
+                config.vlm_name_or_path,
+                dtype=config.model_dtype,
+                attn_implementation="sdpa",
+            )
 
         original_vocab_size = vlm.config.text_config.vocab_size
         vlm.resize_token_embeddings(config.vocab_size)
