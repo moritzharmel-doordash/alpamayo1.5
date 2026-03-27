@@ -92,6 +92,37 @@ def _resolve_attn_implementation(requested: str | None) -> str | None:
     return "sdpa"
 
 
+def _apply_qwenvl3_layer_overrides(
+    vlm_config: Qwen3VLConfig,
+    *,
+    num_layers: int | None,
+    vision_num_layers: int | None,
+) -> None:
+    """Apply optional debug depth overrides before VLM construction."""
+    if num_layers is not None:
+        vlm_config.text_config.num_hidden_layers = int(num_layers)
+        layer_types = getattr(vlm_config.text_config, "layer_types", None)
+        if isinstance(layer_types, list) and layer_types:
+            if len(layer_types) > num_layers:
+                vlm_config.text_config.layer_types = layer_types[:num_layers]
+            elif len(layer_types) < num_layers:
+                vlm_config.text_config.layer_types = layer_types + [layer_types[-1]] * (
+                    num_layers - len(layer_types)
+                )
+        if getattr(vlm_config.text_config, "max_window_layers", None) is not None:
+            vlm_config.text_config.max_window_layers = int(num_layers)
+        if getattr(vlm_config, "max_window_layers", None) is not None:
+            vlm_config.max_window_layers = int(num_layers)
+
+    if vision_num_layers is not None and getattr(vlm_config, "vision_config", None) is not None:
+        vlm_config.vision_config.depth = int(vision_num_layers)
+        fullatt_block_indexes = getattr(vlm_config.vision_config, "fullatt_block_indexes", None)
+        if isinstance(fullatt_block_indexes, list):
+            vlm_config.vision_config.fullatt_block_indexes = [
+                idx for idx in fullatt_block_indexes if int(idx) < int(vision_num_layers)
+            ]
+
+
 def _recursive_setattr(obj: Any, attr: str, value: Any) -> None:
     """Recursively set attribute on object and all its children."""
     setattr(obj, attr, value)
@@ -228,6 +259,8 @@ class ReasoningVLAConfig(PretrainedConfig):
         traj_vocab_size: int = 768,
         tokens_per_history_traj: int = 16,
         tokens_per_future_traj: int = 64,
+        num_layers: int | None = None,
+        vision_num_layers: int | None = None,
         model_dtype: str = "bfloat16",
         attn_implementation: str = "flash_attention_2",
         min_pixels: int | None = None,
@@ -248,6 +281,8 @@ class ReasoningVLAConfig(PretrainedConfig):
         self.traj_vocab_size = traj_vocab_size
         self.tokens_per_history_traj = tokens_per_history_traj
         self.tokens_per_future_traj = tokens_per_future_traj
+        self.num_layers = num_layers
+        self.vision_num_layers = vision_num_layers
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
         self.add_special_tokens = add_special_tokens
@@ -393,6 +428,11 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
             dtype=config.model_dtype,
             attn_implementation=attn_implementation,
         )
+        _apply_qwenvl3_layer_overrides(
+            vlm_config,
+            num_layers=config.num_layers,
+            vision_num_layers=config.vision_num_layers,
+        )
         self.original_vocab_size = vlm_config.text_config.vocab_size
         vlm_config.text_config.vocab_size = config.vocab_size
         vlm_config.vocab_size = config.vocab_size
@@ -408,6 +448,11 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
                 config.vlm_name_or_path,
                 dtype=config.model_dtype,
                 attn_implementation="sdpa",
+            )
+            _apply_qwenvl3_layer_overrides(
+                vlm_config,
+                num_layers=config.num_layers,
+                vision_num_layers=config.vision_num_layers,
             )
             self.original_vocab_size = vlm_config.text_config.vocab_size
             vlm_config.text_config.vocab_size = config.vocab_size
@@ -461,6 +506,12 @@ class ReasoningVLA(PreTrainedModel, TrajectoryFusionMixin):
                 dtype=config.model_dtype,
                 attn_implementation="sdpa",
             )
+
+        _apply_qwenvl3_layer_overrides(
+            vlm.config,
+            num_layers=config.num_layers,
+            vision_num_layers=config.vision_num_layers,
+        )
 
         original_vocab_size = vlm.config.text_config.vocab_size
         vlm.resize_token_embeddings(config.vocab_size)
