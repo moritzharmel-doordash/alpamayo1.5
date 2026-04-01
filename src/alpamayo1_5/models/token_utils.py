@@ -53,6 +53,13 @@ def extract_traj_tokens(
     """
     batch_size, seq_len = output_tokens.shape
     device = output_tokens.device
+    future_start_id = special_token_ids.get("future_start", special_token_ids.get("traj_future_start"))
+    future_end_id = special_token_ids.get("future_end", special_token_ids.get("traj_future_end"))
+    if future_start_id is None or future_end_id is None:
+        raise KeyError(
+            "special_token_ids must include future_start/future_end "
+            "(or legacy traj_future_start/traj_future_end) entries."
+        )
 
     # Initialize output tensor
     traj_tokens = torch.zeros(
@@ -61,7 +68,7 @@ def extract_traj_tokens(
 
     # For each batch, find the first occurrence of end token
     # If no end token, use seq_len as the end position
-    end_mask = output_tokens == special_token_ids["traj_future_end"]
+    end_mask = output_tokens == future_end_id
     end_positions = torch.where(
         end_mask.any(dim=1),
         end_mask.int().argmax(dim=1),
@@ -70,7 +77,7 @@ def extract_traj_tokens(
 
     # For each batch, find the last occurrence of start token
     # We reverse the sequence to find the last occurrence
-    start_mask = output_tokens == special_token_ids["traj_future_start"]
+    start_mask = output_tokens == future_start_id
     start_mask_reversed = torch.flip(start_mask, dims=[1])
     last_start_positions_reversed = start_mask_reversed.int().argmax(dim=1)
     start_positions = seq_len - 1 - last_start_positions_reversed
