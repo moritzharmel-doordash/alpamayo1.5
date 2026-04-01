@@ -329,7 +329,7 @@ class Alpamayo1_5(ReasoningVLA):
         """Decode VLM trajectory tokens to action space for debugging/metrics."""
         vlm_action_tokens = extract_traj_tokens(
             output_tokens=full_vlm_sequences,
-            special_token_ids=self.traj_token_ids,
+            special_token_ids=self.config.traj_token_ids,
             tokens_per_future_traj=self.config.tokens_per_future_traj,
             future_token_start_idx=self.future_token_start_idx,
             traj_tokenizer_vocab_size=self.traj_tokenizer.vocab_size,
