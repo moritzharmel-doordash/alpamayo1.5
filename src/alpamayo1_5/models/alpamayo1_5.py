@@ -258,7 +258,7 @@ class Alpamayo1_5(ReasoningVLA):
         )
         if finite_count > 0:
             finite_values = tensor_detached[finite_mask]
-            if tensor_detached.is_floating_point():
+            if not tensor_detached.is_floating_point() and not tensor_detached.is_complex():
                 finite_values = finite_values.float()
             message += (
                 f" min={finite_values.min().item():.6f}"
