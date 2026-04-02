@@ -57,7 +57,7 @@ def main() -> None:
 
     torch.cuda.manual_seed_all(42)
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        pred_xyz, pred_rot, sampled_action, extra = model.sample_trajectories_from_data_with_vlm_rollout(
+        pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
             data=model_inputs,
             top_p=0.98,
             temperature=0.6,
@@ -67,7 +67,7 @@ def main() -> None:
         )
 
     print("Chain-of-Causation (per trajectory):\n", extra["cot"][0])
-    print("Sampled action shape:", tuple(sampled_action.shape))
+    print("Expert accel shape:", tuple(extra["accel"].shape))
 
     gt_xy = data["ego_future_xyz"].cpu()[0, 0, :, :2].T.numpy()
     pred_xy = pred_xyz.cpu().numpy()[0, 0, :, :, :2].transpose(0, 2, 1)

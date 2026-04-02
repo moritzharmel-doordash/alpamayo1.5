@@ -55,7 +55,7 @@ class ActionSpace(ABC, nn.Module):
         traj_history_rot: torch.Tensor,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Transform the action space to the trajectory.
 
         Args:
@@ -68,6 +68,8 @@ class ActionSpace(ABC, nn.Module):
         Returns:
             traj_future_xyz: (..., T, 3)
             traj_future_rot: (..., T, 3, 3)
+            accel: physical acceleration [m/s^2]  (..., T)
+            kappa: physical curvature [1/m]  (..., T)
         """
 
     @abstractmethod

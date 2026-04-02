@@ -303,7 +303,7 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
         traj_history_xyz: torch.Tensor,
         traj_history_rot: torch.Tensor,
         t0_states: dict[str, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Transform the action space to the trajectory.
 
         Args:
@@ -315,6 +315,8 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
         Returns:
             traj_future_xyz: (..., T, 3)
             traj_future_rot: (..., T, 3, 3)
+            accel: physical acceleration [m/s^2]  (..., T)
+            kappa: physical curvature [1/m]  (..., T)
         """
         accel, kappa = action[..., 0], action[..., 1]
 
@@ -379,4 +381,4 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
 
         traj_future_rot = rot_2d_to_3d(rotation_matrix_torch(theta[..., 1:]))
 
-        return traj_future_xyz, traj_future_rot
+        return traj_future_xyz, traj_future_rot, accel, kappa

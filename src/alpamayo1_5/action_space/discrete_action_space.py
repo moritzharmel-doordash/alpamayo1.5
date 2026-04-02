@@ -83,7 +83,7 @@ class DiscreteTrajectoryTokenizer:
         hist_rot: torch.Tensor,
         tokens: torch.LongTensor,
         hist_tstamp: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Decodes the given tokens into future trajectories.
 
         We assume the the future tstamp is consistent with the future trajectory.
@@ -97,12 +97,13 @@ class DiscreteTrajectoryTokenizer:
         Returns:
             fut_xyz: The decoded future xyz coordinates.
             fut_rot: The decoded future rotation matrices.
-            None: The future timestamps are not decoded.
+            accel: physical acceleration [m/s^2]  (..., T)
+            kappa: physical curvature [1/m]  (..., T)
         """
         action = tokens.reshape(-1, *self.action_space.get_action_space_dims()).to(hist_xyz.dtype)
         dims_min = torch.tensor(self.dims_min, device=action.device, dtype=action.dtype)
         dims_max = torch.tensor(self.dims_max, device=action.device, dtype=action.dtype)
         action = action / (self.num_bins - 1)
         action = action * (dims_max - dims_min) + dims_min
-        fut_xyz, fut_rot = self.action_space.action_to_traj(action, hist_xyz, hist_rot)
-        return fut_xyz, fut_rot, None
+        fut_xyz, fut_rot, accel, kappa = self.action_space.action_to_traj(action, hist_xyz, hist_rot)
+        return fut_xyz, fut_rot, accel, kappa

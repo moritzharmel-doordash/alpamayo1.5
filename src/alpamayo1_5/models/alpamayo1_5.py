@@ -325,8 +325,8 @@ class Alpamayo1_5(ReasoningVLA):
         batch_size: int,
         num_traj_sets: int,
         num_traj_samples: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decode VLM trajectory tokens to action space for debugging/metrics."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode VLM trajectory tokens into batched trajectories and physical controls."""
         vlm_action_tokens = extract_traj_tokens(
             output_tokens=full_vlm_sequences,
             special_token_ids=self.config.traj_token_ids,
@@ -341,25 +341,24 @@ class Alpamayo1_5(ReasoningVLA):
         hist_rot_rep = einops.repeat(
             ego_history_rot[:, -1], "b ... -> (b n) ...", n=n_samples_per_input
         )
-        vlm_traj_xyz, vlm_traj_rot, _ = self.traj_tokenizer.decode(
+        vlm_pred_xyz, vlm_pred_rot, vlm_accel, vlm_kappa = self.traj_tokenizer.decode(
             hist_xyz=hist_xyz_rep,
             hist_rot=hist_rot_rep,
             tokens=vlm_action_tokens,
         )
-        vlm_action = self.action_space.traj_to_action(
-            traj_history_xyz=hist_xyz_rep,
-            traj_history_rot=hist_rot_rep,
-            traj_future_xyz=vlm_traj_xyz,
-            traj_future_rot=vlm_traj_rot,
+        vlm_pred_xyz = einops.rearrange(
+            vlm_pred_xyz, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
-
-        vlm_action_tokens = einops.rearrange(
-            vlm_action_tokens, "(b ns nj) t -> b ns nj t", ns=num_traj_sets, nj=num_traj_samples
+        vlm_pred_rot = einops.rearrange(
+            vlm_pred_rot, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
-        vlm_action = einops.rearrange(
-            vlm_action, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        vlm_accel = einops.rearrange(
+            vlm_accel, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
-        return vlm_action_tokens, vlm_action
+        vlm_kappa = einops.rearrange(
+            vlm_kappa, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        )
+        return vlm_pred_xyz, vlm_pred_rot, vlm_accel, vlm_kappa
 
     def sample_trajectories_from_data_with_vlm_rollout(
         self,
@@ -372,7 +371,7 @@ class Alpamayo1_5(ReasoningVLA):
         diffusion_kwargs: dict[str, Any] | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Sample trajectories from the data with VLM rollout.
 
         Args:
@@ -388,8 +387,7 @@ class Alpamayo1_5(ReasoningVLA):
         Returns:
             pred_xyz: The predicted xyz.
             pred_rot: The predicted rotation.
-            sampled_action: The sampled expert action.
-            extra: Optional dict containing text traces and VLM actions.
+            extra: Dict containing expert physical controls and optional debug outputs.
         """
         data = copy.deepcopy(data)
         return_extra = bool(kwargs.get("return_extra", False))
@@ -534,7 +532,7 @@ class Alpamayo1_5(ReasoningVLA):
             ego_history_rot[:, -1], "b ... -> (b n) ...", n=n_samples_total
         )
 
-        pred_xyz, pred_rot = self.action_space.action_to_traj(
+        pred_xyz, pred_rot, accel, kappa = self.action_space.action_to_traj(
             sampled_action, hist_xyz_rep, hist_rot_rep
         )
 
@@ -545,45 +543,51 @@ class Alpamayo1_5(ReasoningVLA):
         pred_rot = einops.rearrange(
             pred_rot, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
-        sampled_action = einops.rearrange(
-            sampled_action, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        accel = einops.rearrange(
+            accel, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        )
+        kappa = einops.rearrange(
+            kappa, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
 
-        if return_extra or return_vlm_actions:
-            extra: dict[str, Any] = {}
-            if return_extra:
-                extra.update(
-                    self._reshape_text_extra(
-                        extract_text_tokens(self.tokenizer, vlm_outputs.sequences),
-                        batch_size=input_ids.shape[0],
-                        num_traj_sets=num_traj_sets,
-                        num_traj_samples=num_traj_samples,
-                    )
-                )
-            if return_vlm_actions:
-                assert raw_vlm_sequences is not None
-                assert continuation_rng_state is not None
-                full_vlm_sequences = self._continue_vlm_rollout_from_cache(
-                    raw_vlm_sequences=raw_vlm_sequences,
-                    prompt_cache=prompt_cache,
-                    offset=offset,
-                    top_p=top_p,
-                    top_k=top_k,
-                    temperature=temperature,
-                    rng_state=continuation_rng_state,
-                )
-                vlm_action_tokens, vlm_action = self._decode_vlm_action_outputs(
-                    full_vlm_sequences=full_vlm_sequences,
-                    ego_history_xyz=ego_history_xyz,
-                    ego_history_rot=ego_history_rot,
+        extra: dict[str, Any] = {
+            "accel": accel,
+            "kappa": kappa,
+        }
+        if return_extra:
+            extra.update(
+                self._reshape_text_extra(
+                    extract_text_tokens(self.tokenizer, vlm_outputs.sequences),
                     batch_size=input_ids.shape[0],
                     num_traj_sets=num_traj_sets,
                     num_traj_samples=num_traj_samples,
                 )
-                extra["vlm_action_tokens"] = vlm_action_tokens
-                extra["vlm_action"] = vlm_action
-            return pred_xyz, pred_rot, sampled_action, extra
-        return pred_xyz, pred_rot, sampled_action
+            )
+        if return_vlm_actions:
+            assert raw_vlm_sequences is not None
+            assert continuation_rng_state is not None
+            full_vlm_sequences = self._continue_vlm_rollout_from_cache(
+                raw_vlm_sequences=raw_vlm_sequences,
+                prompt_cache=prompt_cache,
+                offset=offset,
+                top_p=top_p,
+                top_k=top_k,
+                temperature=temperature,
+                rng_state=continuation_rng_state,
+            )
+            vlm_fut_xyz, vlm_fut_rot, vlm_accel, vlm_kappa = self._decode_vlm_action_outputs(
+                full_vlm_sequences=full_vlm_sequences,
+                ego_history_xyz=ego_history_xyz,
+                ego_history_rot=ego_history_rot,
+                batch_size=input_ids.shape[0],
+                num_traj_sets=num_traj_sets,
+                num_traj_samples=num_traj_samples,
+            )
+            extra["vlm_pred_xyz"] = vlm_fut_xyz
+            extra["vlm_pred_rot"] = vlm_fut_rot
+            extra["vlm_accel"] = vlm_accel
+            extra["vlm_kappa"] = vlm_kappa
+        return pred_xyz, pred_rot, extra
 
     @torch.no_grad()
     def sample_trajectories_from_data_with_vlm_rollout_cfg_nav(
@@ -597,7 +601,7 @@ class Alpamayo1_5(ReasoningVLA):
         diffusion_kwargs: dict[str, Any] | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Sample trajectories from the data with VLM rollout.
 
         Args:
@@ -613,8 +617,7 @@ class Alpamayo1_5(ReasoningVLA):
         Returns:
             pred_xyz: The predicted xyz.
             pred_rot: The predicted rotation.
-            sampled_action: The sampled expert action.
-            extra: Optional dict containing text traces and VLM actions.
+            extra: Dict containing expert physical controls and optional debug outputs.
         """
         data = copy.deepcopy(data)
         return_extra = bool(kwargs.get("return_extra", False))
@@ -859,7 +862,7 @@ class Alpamayo1_5(ReasoningVLA):
             ego_history_rot[:, -1], "b ... -> (b n) ...", n=n_samples_total
         )
 
-        pred_xyz, pred_rot = self.action_space.action_to_traj(
+        pred_xyz, pred_rot, accel, kappa = self.action_space.action_to_traj(
             sampled_action, hist_xyz_rep, hist_rot_rep
         )
 
@@ -870,45 +873,51 @@ class Alpamayo1_5(ReasoningVLA):
         pred_rot = einops.rearrange(
             pred_rot, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
-        sampled_action = einops.rearrange(
-            sampled_action, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        accel = einops.rearrange(
+            accel, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
+        )
+        kappa = einops.rearrange(
+            kappa, "(b ns nj) ... -> b ns nj ...", ns=num_traj_sets, nj=num_traj_samples
         )
 
-        if return_extra or return_vlm_actions:
-            extra: dict[str, Any] = {}
-            if return_extra:
-                extra.update(
-                    self._reshape_text_extra(
-                        extract_text_tokens(self.tokenizer, vlm_outputs.sequences),
-                        batch_size=input_ids.shape[0],
-                        num_traj_sets=num_traj_sets,
-                        num_traj_samples=num_traj_samples,
-                    )
-                )
-            if return_vlm_actions:
-                assert raw_vlm_sequences is not None
-                assert continuation_rng_state is not None
-                full_vlm_sequences = self._continue_vlm_rollout_from_cache(
-                    raw_vlm_sequences=raw_vlm_sequences,
-                    prompt_cache=prompt_cache,
-                    offset=offset,
-                    top_p=top_p,
-                    top_k=top_k,
-                    temperature=temperature,
-                    rng_state=continuation_rng_state,
-                )
-                vlm_action_tokens, vlm_action = self._decode_vlm_action_outputs(
-                    full_vlm_sequences=full_vlm_sequences,
-                    ego_history_xyz=ego_history_xyz,
-                    ego_history_rot=ego_history_rot,
+        extra: dict[str, Any] = {
+            "accel": accel,
+            "kappa": kappa,
+        }
+        if return_extra:
+            extra.update(
+                self._reshape_text_extra(
+                    extract_text_tokens(self.tokenizer, vlm_outputs.sequences),
                     batch_size=input_ids.shape[0],
                     num_traj_sets=num_traj_sets,
                     num_traj_samples=num_traj_samples,
                 )
-                extra["vlm_action_tokens"] = vlm_action_tokens
-                extra["vlm_action"] = vlm_action
-            return pred_xyz, pred_rot, sampled_action, extra
-        return pred_xyz, pred_rot, sampled_action
+            )
+        if return_vlm_actions:
+            assert raw_vlm_sequences is not None
+            assert continuation_rng_state is not None
+            full_vlm_sequences = self._continue_vlm_rollout_from_cache(
+                raw_vlm_sequences=raw_vlm_sequences,
+                prompt_cache=prompt_cache,
+                offset=offset,
+                top_p=top_p,
+                top_k=top_k,
+                temperature=temperature,
+                rng_state=continuation_rng_state,
+            )
+            vlm_fut_xyz, vlm_fut_rot, vlm_accel, vlm_kappa = self._decode_vlm_action_outputs(
+                full_vlm_sequences=full_vlm_sequences,
+                ego_history_xyz=ego_history_xyz,
+                ego_history_rot=ego_history_rot,
+                batch_size=input_ids.shape[0],
+                num_traj_sets=num_traj_sets,
+                num_traj_samples=num_traj_samples,
+            )
+            extra["vlm_pred_xyz"] = vlm_fut_xyz
+            extra["vlm_pred_rot"] = vlm_fut_rot
+            extra["vlm_accel"] = vlm_accel
+            extra["vlm_kappa"] = vlm_kappa
+        return pred_xyz, pred_rot, extra
 
 
 AutoConfig.register("alpamayo1_5", Alpamayo1_5Config)
