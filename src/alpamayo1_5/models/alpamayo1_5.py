@@ -244,6 +244,45 @@ class Alpamayo1_5(ReasoningVLA):
         return reshaped
 
     @staticmethod
+    def _debug_tensor_stats(name: str, tensor: torch.Tensor) -> None:
+        """Print quick tensor stats for local NaN debugging."""
+        tensor_detached = tensor.detach()
+        finite_mask = torch.isfinite(tensor_detached)
+        finite_count = int(finite_mask.sum().item())
+        total_count = tensor_detached.numel()
+        finite_ratio = finite_count / total_count if total_count > 0 else 1.0
+        message = (
+            f"[alpamayo debug] {name}: shape={tuple(tensor_detached.shape)} "
+            f"dtype={tensor_detached.dtype} device={tensor_detached.device} "
+            f"finite={finite_count}/{total_count} ({finite_ratio:.6f})"
+        )
+        if finite_count > 0:
+            finite_values = tensor_detached[finite_mask]
+            if tensor_detached.is_floating_point():
+                finite_values = finite_values.float()
+            message += (
+                f" min={finite_values.min().item():.6f}"
+                f" max={finite_values.max().item():.6f}"
+                f" mean={finite_values.mean().item():.6f}"
+            )
+        else:
+            message += " min=nan max=nan mean=nan"
+        print(message, flush=True)
+
+    @staticmethod
+    def _debug_attention_mask(name: str, attention_mask: torch.Tensor) -> None:
+        """Print mask summary and whether any query row is fully masked."""
+        mask = attention_mask.detach()
+        mask_min = torch.finfo(mask.dtype).min
+        all_masked_queries = (mask == mask_min).all(dim=-1)
+        print(
+            f"[alpamayo debug] {name}: shape={tuple(mask.shape)} dtype={mask.dtype} "
+            f"all_masked_queries={bool(all_masked_queries.any().item())}",
+            flush=True,
+        )
+        Alpamayo1_5._debug_tensor_stats(f"{name}/values", mask)
+
+    @staticmethod
     def _merge_continuation_sequences(
         raw_sequences: torch.Tensor,
         continuation_sequences: torch.Tensor,
@@ -487,11 +526,21 @@ class Alpamayo1_5(ReasoningVLA):
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            print(
+                f"[alpamayo debug] expert step_fn guided batch={b_star} "
+                f"n_diffusion_tokens={n_diffusion_tokens}",
+                flush=True,
+            )
+            self._debug_tensor_stats("guided/x", x)
+            self._debug_tensor_stats("guided/t", t)
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
+            self._debug_tensor_stats("guided/future_token_embeds", future_token_embeds)
+            self._debug_tensor_stats("guided/position_ids", position_ids)
+            self._debug_attention_mask("guided/attention_mask", attention_mask)
 
             # Run expert with cached prefill, only on the future tokens
             expert_out_base = self.expert(
@@ -505,10 +554,12 @@ class Alpamayo1_5(ReasoningVLA):
             # crop the prompt cache to remove the newly added tokens
             prompt_cache.crop(prefill_seq_len)
             last_hidden = expert_out_base.last_hidden_state  # (b*, Tf, hidden_size)
+            self._debug_tensor_stats("guided/last_hidden_state", last_hidden)
             last_hidden = last_hidden[:, -n_diffusion_tokens:]
             pred = self.action_out_proj(last_hidden).view(
                 -1, *self.action_space.get_action_space_dims()
             )  # (b*, Tf, C_action) -> noise/vector field
+            self._debug_tensor_stats("guided/pred", pred)
             return pred
 
         # 3) Diffusion sampling in action space with multiple samples per input
@@ -801,15 +852,26 @@ class Alpamayo1_5(ReasoningVLA):
             position_ids: torch.Tensor,
             past_key_values: torch.Tensor,
             attention_mask: torch.Tensor,
+            debug_label: str,
         ) -> torch.Tensor:
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            print(
+                f"[alpamayo debug] expert step_fn {debug_label} batch={b_star} "
+                f"n_diffusion_tokens={n_diffusion_tokens}",
+                flush=True,
+            )
+            self._debug_tensor_stats(f"{debug_label}/x", x)
+            self._debug_tensor_stats(f"{debug_label}/t", t)
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
+            self._debug_tensor_stats(f"{debug_label}/future_token_embeds", future_token_embeds)
+            self._debug_tensor_stats(f"{debug_label}/position_ids", position_ids)
+            self._debug_attention_mask(f"{debug_label}/attention_mask", attention_mask)
 
             # Run expert with cached prefill, only on the future tokens
             prefill_seq_len = past_key_values.get_seq_length()
@@ -824,10 +886,12 @@ class Alpamayo1_5(ReasoningVLA):
             # crop the prompt cache to remove the newly added tokens
             past_key_values.crop(prefill_seq_len)
             last_hidden = expert_out_base.last_hidden_state  # (b*, Tf, hidden_size)
+            self._debug_tensor_stats(f"{debug_label}/last_hidden_state", last_hidden)
             last_hidden = last_hidden[:, -n_diffusion_tokens:]
             pred = self.action_out_proj(last_hidden).view(
                 -1, *self.action_space.get_action_space_dims()
             )  # (b*, Tf, C_action) -> noise/vector field
+            self._debug_tensor_stats(f"{debug_label}/pred", pred)
             return pred
 
         # 4) Diffusion sampling in action space with multiple samples per input
@@ -842,12 +906,14 @@ class Alpamayo1_5(ReasoningVLA):
                 past_key_values=prompt_cache,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
+                debug_label="guided",
             ),
             unguided_step_fn=partial(
                 step_fn,
                 past_key_values=unguided_prompt_cache,
                 attention_mask=unguided_attention_mask,
                 position_ids=unguided_position_ids,
+                debug_label="unguided",
             ),
             device=device,
             return_all_steps=False,

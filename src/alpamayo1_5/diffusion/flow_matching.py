@@ -178,6 +178,12 @@ class FlowMatching(BaseDiffusion):
             dt = time_steps[i + 1] - time_steps[i]
             dt = dt.view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
             t_start = time_steps[i].view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
+            print(
+                f"[flow_matching debug] step {i + 1}/{inference_step} "
+                f"t={time_steps[i].item():.6f}->{time_steps[i + 1].item():.6f} "
+                f"x_finite={bool(torch.isfinite(x).all().item())}",
+                flush=True,
+            )
             if use_classifier_free_guidance:
                 v = self._guided_v(
                     step_fn=step_fn,
@@ -188,7 +194,17 @@ class FlowMatching(BaseDiffusion):
                 )
             else:
                 v = step_fn(x=x, t=t_start)
+            print(
+                f"[flow_matching debug] step {i + 1}/{inference_step} "
+                f"v_finite={bool(torch.isfinite(v).all().item())}",
+                flush=True,
+            )
             x = x + dt * v
+            print(
+                f"[flow_matching debug] step {i + 1}/{inference_step} "
+                f"x_next_finite={bool(torch.isfinite(x).all().item())}",
+                flush=True,
+            )
             if return_all_steps:
                 all_steps.append(x)
         if return_all_steps:
