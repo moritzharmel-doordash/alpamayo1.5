@@ -136,6 +136,8 @@ class Alpamayo1_5(ReasoningVLA):
             self.config.use_cache = enabled
         if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "use_cache"):
             self.vlm.config.use_cache = enabled
+        if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "text_config") and hasattr(self.vlm.config.text_config, "use_cache"):
+            self.vlm.config.text_config.use_cache = enabled
         if hasattr(self.expert, "config") and hasattr(self.expert.config, "use_cache"):
             self.expert.config.use_cache = enabled
 
