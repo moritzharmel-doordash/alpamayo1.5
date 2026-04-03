@@ -85,6 +85,7 @@ class Alpamayo1_5(ReasoningVLA):
 
     config_class: type[Alpamayo1_5Config] = Alpamayo1_5Config
     base_model_prefix = "vlm"
+    supports_gradient_checkpointing = True
 
     def __init__(
         self,
@@ -128,6 +129,33 @@ class Alpamayo1_5(ReasoningVLA):
             self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
 
         self.post_init()
+
+    def _set_use_cache(self, enabled: bool) -> None:
+        """Synchronize cache settings across the wrapper and checkpointed submodules."""
+        if hasattr(self.config, "use_cache"):
+            self.config.use_cache = enabled
+        if hasattr(self.vlm, "config") and hasattr(self.vlm.config, "use_cache"):
+            self.vlm.config.use_cache = enabled
+        if hasattr(self.expert, "config") and hasattr(self.expert.config, "use_cache"):
+            self.expert.config.use_cache = enabled
+
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs: dict[str, Any] | None = None
+    ) -> None:
+        """Enable gradient checkpointing on Alpamayo checkpoint-aware submodules."""
+        self.vlm.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+        )
+        self.expert.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+        )
+        self._set_use_cache(False)
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on Alpamayo checkpoint-aware submodules."""
+        self.vlm.gradient_checkpointing_disable()
+        self.expert.gradient_checkpointing_disable()
+        self._set_use_cache(True)
 
     @staticmethod
     def _find_eos_offset(
