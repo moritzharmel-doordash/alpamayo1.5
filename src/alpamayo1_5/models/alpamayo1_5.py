@@ -34,6 +34,12 @@ from alpamayo1_5.action_space import ActionSpace
 from alpamayo1_5.models.base_model import ReasoningVLA
 from alpamayo1_5.config import Alpamayo1_5Config
 from alpamayo1_5.diffusion.base import BaseDiffusion
+from alpamayo1_5.diffusion.flow_matching import (
+    _denoising_debug_enabled,
+    _log_denoising_debug,
+    _should_log_denoising_step,
+    _tensor_debug_summary,
+)
 from alpamayo1_5.models.token_utils import (
     StopAfterEOS,
     extract_text_tokens,
@@ -510,18 +516,37 @@ class Alpamayo1_5(ReasoningVLA):
             forward_kwargs["is_causal"] = False
 
         # 2) Define denoising step that consumes noisy action and timestep
+        native_step_idx = 0
+
         def step_fn(
             x: torch.Tensor,
             t: torch.Tensor,
         ) -> torch.Tensor:
+            nonlocal native_step_idx
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            should_log_step = _denoising_debug_enabled() and _should_log_denoising_step(
+                native_step_idx
+            )
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_step_start step={native_step_idx} "
+                    f"{_tensor_debug_summary('x', x)} "
+                    f"{_tensor_debug_summary('t', t)}"
+                )
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_step_embeds step={native_step_idx} "
+                    f"{_tensor_debug_summary('future_token_embeds', future_token_embeds)} "
+                    f"{_tensor_debug_summary('position_ids', position_ids)} "
+                    f"{_tensor_debug_summary('attention_mask', attention_mask)}"
+                )
 
             # Run expert with cached prefill, only on the future tokens
             expert_out_base = self.expert(
@@ -539,6 +564,13 @@ class Alpamayo1_5(ReasoningVLA):
             pred = self.action_out_proj(last_hidden).view(
                 -1, *self.action_space.get_action_space_dims()
             )  # (b*, Tf, C_action) -> noise/vector field
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_step_output step={native_step_idx} "
+                    f"{_tensor_debug_summary('last_hidden', last_hidden)} "
+                    f"{_tensor_debug_summary('pred', pred)}"
+                )
+            native_step_idx += 1
             return pred
 
         # 3) Diffusion sampling in action space with multiple samples per input
@@ -825,6 +857,8 @@ class Alpamayo1_5(ReasoningVLA):
             forward_kwargs["is_causal"] = False
 
         # 3) Define denoising step that consumes noisy action and timestep
+        native_cfg_step_idx = 0
+
         def step_fn(
             x: torch.Tensor,
             t: torch.Tensor,
@@ -832,14 +866,31 @@ class Alpamayo1_5(ReasoningVLA):
             past_key_values: torch.Tensor,
             attention_mask: torch.Tensor,
         ) -> torch.Tensor:
+            nonlocal native_cfg_step_idx
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
+            should_log_step = _denoising_debug_enabled() and _should_log_denoising_step(
+                native_cfg_step_idx
+            )
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_cfg_step_start call={native_cfg_step_idx} "
+                    f"{_tensor_debug_summary('x', x)} "
+                    f"{_tensor_debug_summary('t', t)}"
+                )
             # Project noisy action to expert token embeddings for the n future tokens
             # Expect shape (b*, n_token_per_traj, hidden_size)
             future_token_embeds = self.action_in_proj(x, t)
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_cfg_step_embeds call={native_cfg_step_idx} "
+                    f"{_tensor_debug_summary('future_token_embeds', future_token_embeds)} "
+                    f"{_tensor_debug_summary('position_ids', position_ids)} "
+                    f"{_tensor_debug_summary('attention_mask', attention_mask)}"
+                )
 
             # Run expert with cached prefill, only on the future tokens
             prefill_seq_len = past_key_values.get_seq_length()
@@ -858,6 +909,13 @@ class Alpamayo1_5(ReasoningVLA):
             pred = self.action_out_proj(last_hidden).view(
                 -1, *self.action_space.get_action_space_dims()
             )  # (b*, Tf, C_action) -> noise/vector field
+            if should_log_step:
+                _log_denoising_debug(
+                    f"native_cfg_step_output call={native_cfg_step_idx} "
+                    f"{_tensor_debug_summary('last_hidden', last_hidden)} "
+                    f"{_tensor_debug_summary('pred', pred)}"
+                )
+            native_cfg_step_idx += 1
             return pred
 
         # 4) Diffusion sampling in action space with multiple samples per input

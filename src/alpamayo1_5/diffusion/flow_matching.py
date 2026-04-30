@@ -13,10 +13,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Literal
 
 import torch
 from alpamayo1_5.diffusion.base import BaseDiffusion, StepFn
+
+
+def _denoising_debug_enabled() -> bool:
+    value = os.environ.get("ALPAMAYO_DENOISING_DEBUG", "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _denoising_debug_steps() -> int | None:
+    value = os.environ.get("ALPAMAYO_DENOISING_DEBUG_STEPS", "").strip()
+    if not value:
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return None
+
+
+def _should_log_denoising_step(step_idx: int) -> bool:
+    max_steps = _denoising_debug_steps()
+    return max_steps is None or step_idx < max_steps
+
+
+def _tensor_debug_summary(name: str, tensor: torch.Tensor, *, head: int = 8) -> str:
+    detached = tensor.detach()
+    flat = detached.reshape(-1)
+    if flat.numel() == 0:
+        return (
+            f"{name}: shape={tuple(detached.shape)} dtype={detached.dtype} "
+            f"device={detached.device} empty"
+        )
+    stats = flat.to(dtype=torch.float32)
+    return (
+        f"{name}: shape={tuple(detached.shape)} dtype={detached.dtype} device={detached.device} "
+        f"min={float(stats.min().item()):.6g} max={float(stats.max().item()):.6g} "
+        f"mean={float(stats.mean().item()):.6g} "
+        f"std={float(stats.std(unbiased=False).item()):.6g} "
+        f"head={flat[:head].detach().cpu().tolist()}"
+    )
+
+
+def _log_denoising_debug(message: str) -> None:
+    if _denoising_debug_enabled():
+        print(f"[alpamayo_denoising] {message}", flush=True)
 
 
 class FlowMatching(BaseDiffusion):
@@ -170,6 +214,15 @@ class FlowMatching(BaseDiffusion):
         """
         x = torch.randn(batch_size, *self.x_dims, device=device) * temperature
         time_steps = torch.linspace(0.0, 1.0, inference_step + 1, device=device)
+        if _denoising_debug_enabled():
+            _log_denoising_debug(
+                "flow_matching_init "
+                f"batch_size={batch_size} x_dims={self.x_dims} inference_step={inference_step} "
+                f"temperature={temperature} int_method=euler "
+                f"use_classifier_free_guidance={use_classifier_free_guidance}"
+            )
+            _log_denoising_debug(_tensor_debug_summary("initial_x", x))
+            _log_denoising_debug(_tensor_debug_summary("time_steps", time_steps))
         n_dim = len(self.x_dims)
         if return_all_steps:
             all_steps = [x]
@@ -178,6 +231,13 @@ class FlowMatching(BaseDiffusion):
             dt = time_steps[i + 1] - time_steps[i]
             dt = dt.view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
             t_start = time_steps[i].view(1, *[1] * n_dim).expand(batch_size, *[1] * n_dim)
+            if _denoising_debug_enabled() and _should_log_denoising_step(i):
+                _log_denoising_debug(
+                    f"flow_matching_step_start step={i} "
+                    f"{_tensor_debug_summary('x_before', x)} "
+                    f"{_tensor_debug_summary('t', t_start)} "
+                    f"{_tensor_debug_summary('dt', dt)}"
+                )
             if use_classifier_free_guidance:
                 v = self._guided_v(
                     step_fn=step_fn,
@@ -188,7 +248,17 @@ class FlowMatching(BaseDiffusion):
                 )
             else:
                 v = step_fn(x=x, t=t_start)
+            if _denoising_debug_enabled() and _should_log_denoising_step(i):
+                _log_denoising_debug(
+                    f"flow_matching_step_prediction step={i} "
+                    f"{_tensor_debug_summary('v', v)}"
+                )
             x = x + dt * v
+            if _denoising_debug_enabled() and _should_log_denoising_step(i):
+                _log_denoising_debug(
+                    f"flow_matching_step_end step={i} "
+                    f"{_tensor_debug_summary('x_after', x)}"
+                )
             if return_all_steps:
                 all_steps.append(x)
         if return_all_steps:
