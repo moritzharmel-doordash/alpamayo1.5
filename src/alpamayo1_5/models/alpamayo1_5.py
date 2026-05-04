@@ -428,6 +428,7 @@ class Alpamayo1_5(ReasoningVLA):
         data = copy.deepcopy(data)
         return_extra = bool(kwargs.get("return_extra", False))
         return_vlm_actions = bool(kwargs.get("return_vlm_actions", False))
+        trajectory_rng_seed = kwargs.get("trajectory_rng_seed")
         n_samples_total = num_traj_samples * num_traj_sets
         ego_history_xyz = data["ego_history_xyz"]
         ego_history_rot = data["ego_history_rot"]
@@ -578,13 +579,22 @@ class Alpamayo1_5(ReasoningVLA):
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
 
-        sampled_action = self.diffusion.sample(
-            batch_size=total_batch,
-            step_fn=step_fn,
-            device=device,
-            return_all_steps=False,
-            **diffusion_kwargs,
+        current_rng_state = (
+            self._capture_rng_state(device) if trajectory_rng_seed is not None else None
         )
+        if trajectory_rng_seed is not None:
+            torch.manual_seed(int(trajectory_rng_seed))
+        try:
+            sampled_action = self.diffusion.sample(
+                batch_size=total_batch,
+                step_fn=step_fn,
+                device=device,
+                return_all_steps=False,
+                **diffusion_kwargs,
+            )
+        finally:
+            if current_rng_state is not None:
+                self._restore_rng_state(current_rng_state)
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(
@@ -684,6 +694,7 @@ class Alpamayo1_5(ReasoningVLA):
         data = copy.deepcopy(data)
         return_extra = bool(kwargs.get("return_extra", False))
         return_vlm_actions = bool(kwargs.get("return_vlm_actions", False))
+        trajectory_rng_seed = kwargs.get("trajectory_rng_seed")
         n_samples_total = num_traj_samples * num_traj_sets
         ego_history_xyz = data["ego_history_xyz"]
         ego_history_rot = data["ego_history_rot"]
@@ -923,24 +934,33 @@ class Alpamayo1_5(ReasoningVLA):
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
 
-        sampled_action = self.diffusion.sample(
-            batch_size=total_batch,
-            step_fn=partial(
-                step_fn,
-                past_key_values=prompt_cache,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-            ),
-            unguided_step_fn=partial(
-                step_fn,
-                past_key_values=unguided_prompt_cache,
-                attention_mask=unguided_attention_mask,
-                position_ids=unguided_position_ids,
-            ),
-            device=device,
-            return_all_steps=False,
-            **diffusion_kwargs,
+        current_rng_state = (
+            self._capture_rng_state(device) if trajectory_rng_seed is not None else None
         )
+        if trajectory_rng_seed is not None:
+            torch.manual_seed(int(trajectory_rng_seed))
+        try:
+            sampled_action = self.diffusion.sample(
+                batch_size=total_batch,
+                step_fn=partial(
+                    step_fn,
+                    past_key_values=prompt_cache,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                ),
+                unguided_step_fn=partial(
+                    step_fn,
+                    past_key_values=unguided_prompt_cache,
+                    attention_mask=unguided_attention_mask,
+                    position_ids=unguided_position_ids,
+                ),
+                device=device,
+                return_all_steps=False,
+                **diffusion_kwargs,
+            )
+        finally:
+            if current_rng_state is not None:
+                self._restore_rng_state(current_rng_state)
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(
